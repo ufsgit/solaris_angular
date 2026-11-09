@@ -2,10 +2,11 @@ import { Injectable, signal, computed } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable, tap, catchError, throwError } from 'rxjs';
 import { CompanyUrlResponse } from '../models/auth.models';
+import { environment } from '../../../environments/environment';
 
 const STORAGE_KEY_BASE_URL = 'company_base_url';
 const STORAGE_KEY_CODE = 'company_code';
-const RESOLVER_ENDPOINT = 'https://solarisapi.ufstech.net.in/settings/Get_Company_Url';
+const RESOLVER_ENDPOINT = `${environment.baseUrl}/settings/Get_Company_Url`;
 
 @Injectable({
   providedIn: 'root'
