@@ -1,0 +1,539 @@
+import {
+  Component,
+  Input,
+  Output,
+  EventEmitter,
+  OnInit,
+  inject,
+  signal,
+  ViewChild
+} from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { TaskService } from '../../../core/services/task.service';
+import { MetadataService } from '../../../core/services/metadata.service';
+import { AuthService } from '../../../core/services/auth.service';
+import {
+  TaskOverviewItem,
+  ProcessFlowResponse,
+  ProcessFlowTaskType,
+  TaskStatusChangePayload
+} from '../../../core/models/task.models';
+import { WorkingStatusItem, UserDetailItem } from '../../../core/models/auth.models';
+import {
+  CustomFieldDefinition,
+  CustomFieldValuePayload
+} from '../../../core/models/custom-field.models';
+import { DynamicCustomFieldsComponent } from '../../../shared/components/dynamic-custom-fields/dynamic-custom-fields.component';
+
+@Component({
+  selector: 'app-task-status-modal',
+  standalone: true,
+  imports: [CommonModule, FormsModule, DynamicCustomFieldsComponent],
+  template: `
+    <div class="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+      <div class="w-full max-w-2xl bg-white rounded-2xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col max-h-[92vh]">
+        <!-- Header -->
+        <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/70">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-700 uppercase">
+                Process Flow Engine
+              </span>
+              <h2 class="text-base font-bold text-slate-800">
+                Change Task Status & Progression
+              </h2>
+            </div>
+            <p class="text-xs text-slate-500 mt-1">
+              Task: <strong class="text-slate-700">{{ task.Task_Type_Name }}</strong> (ID: #{{ task.Task_Id }}) •
+              Customer: <span class="text-indigo-600 font-medium">{{ task.Customer_Name }}</span>
+            </p>
+          </div>
+          <button
+            type="button"
+            (click)="close.emit()"
+            class="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-200/50 transition"
+          >
+            ✕
+          </button>
+        </div>
+
+        <!-- Body -->
+        <div class="p-6 overflow-y-auto space-y-5 flex-1">
+          @if (errorMessage()) {
+            <div class="p-3 text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg">
+              {{ errorMessage() }}
+            </div>
+          }
+
+          <!-- Status Selection -->
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1.5">
+              Select New Task Status <span class="text-rose-500">*</span>
+            </label>
+            <select
+              [(ngModel)]="selectedStatusId"
+              (ngModelChange)="onStatusSelected($event)"
+              class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
+            >
+              <option [value]="0">-- Choose Status to trigger Process Flow --</option>
+              @for (st of statuses(); track st.Status_Id) {
+                <option [value]="st.Status_Id">{{ st.Status_Name }}</option>
+              }
+            </select>
+          </div>
+
+          <!-- Loading Process Flow -->
+          @if (isLoadingFlow()) {
+            <div class="flex items-center justify-center p-6 bg-slate-50 rounded-xl border border-slate-200 gap-3">
+              <svg class="animate-spin h-5 w-5 text-indigo-600" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+              </svg>
+              <span class="text-xs font-medium text-slate-600">Evaluating process flow rules & next actions...</span>
+            </div>
+          }
+
+          <!-- Process Flow Feedback Banner -->
+          @if (flowMessage()) {
+            <div class="p-4 bg-indigo-50/80 border border-indigo-200 rounded-xl">
+              <div class="flex items-start gap-2.5">
+                <div class="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center text-xs shrink-0 mt-0.5">
+                  ⚡
+                </div>
+                <div>
+                  <h4 class="text-xs font-bold text-indigo-950 uppercase tracking-wide">
+                    Next Workflow Actions (Flow #{{ flowId }})
+                  </h4>
+                  <p class="text-xs text-indigo-800 mt-0.5">
+                    {{ flowMessage() }}
+                  </p>
+                </div>
+              </div>
+            </div>
+          }
+
+          <!-- Subsequent Tasks Generated by Process Flow -->
+          @if (subsequentTasks().length > 0) {
+            <div class="space-y-3">
+              <div class="flex items-center justify-between">
+                <label class="text-xs font-bold uppercase tracking-wider text-slate-700">
+                  Auto-Generated Subsequent Tasks
+                </label>
+                <span class="text-[11px] text-slate-500">Assign responsible executives</span>
+              </div>
+
+              <div class="space-y-2.5">
+                @for (subTask of subsequentTasks(); track subTask.Task_Type_Id) {
+                  <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5">
+                    <div class="flex items-center justify-between">
+                      <label class="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          [(ngModel)]="taskCheckedMap[subTask.Task_Type_Id]"
+                          (ngModelChange)="onSubTaskCheckToggle(subTask)"
+                          class="h-4 w-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300"
+                        />
+                        <span class="text-xs font-bold text-slate-800">
+                          {{ subTask.Order_No }}. {{ subTask.Task_Type_Name }}
+                        </span>
+                      </label>
+                      <span class="px-2 py-0.5 bg-slate-200/70 text-slate-700 rounded text-[11px] font-medium">
+                        Duration: {{ subTask.Duration }} day(s)
+                      </span>
+                    </div>
+
+                    @if (taskCheckedMap[subTask.Task_Type_Id]) {
+                      <div class="flex items-center gap-2 pt-1">
+                        <span class="text-xs text-slate-500 shrink-0">Assign to:</span>
+                        <select
+                          [(ngModel)]="taskUserMap[subTask.Task_Type_Id]"
+                          class="flex-1 px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg focus:ring-1 focus:ring-indigo-500"
+                        >
+                          @for (u of users(); track u.User_Details_Id) {
+                            <option [value]="u.User_Details_Id">
+                              {{ u.User_Details_Name }} ({{ u.Department_Name || 'Ops' }})
+                            </option>
+                          }
+                        </select>
+                      </div>
+                    }
+                  </div>
+                }
+              </div>
+            </div>
+          }
+
+          <!-- Process Flow Custom Fields (if defined) -->
+          @if (customFields().length > 0) {
+            <div class="pt-2 border-t border-slate-200">
+              <h3 class="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                Flow Specification Fields
+              </h3>
+              <app-dynamic-custom-fields
+                #customFieldsComp
+                [fields]="customFields()"
+                (valuesChange)="onCustomFieldsChanged($event)"
+              />
+            </div>
+          }
+
+          <!-- Follow-up Scheduling Section -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-200">
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">
+                Next Follow-Up Date
+                <span class="text-[10px] text-indigo-600 font-normal">(Auto-calculated)</span>
+              </label>
+              <input
+                type="date"
+                [(ngModel)]="nextFollowUpDate"
+                class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
+              />
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">
+                Follow-up Time
+              </label>
+              <input
+                type="time"
+                [(ngModel)]="followupTime"
+                class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
+              />
+            </div>
+          </div>
+
+          <!-- Description & Remarks -->
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">
+                Work Completion Summary / Description <span class="text-rose-500">*</span>
+              </label>
+              <input
+                type="text"
+                [(ngModel)]="description"
+                placeholder="e.g. Survey verified, electrical structure inspected"
+                class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
+              />
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">
+                Internal Remarks / Site Notes
+              </label>
+              <textarea
+                [(ngModel)]="remarks"
+                rows="2"
+                placeholder="e.g. Roof has direct south-facing sunlight, phase meter confirmed"
+                class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition resize-none"
+              ></textarea>
+            </div>
+          </div>
+
+          <!-- Location Coordinates -->
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3 p-3 bg-slate-50 rounded-xl border border-slate-200">
+            <div class="md:col-span-1">
+              <label class="block text-[11px] font-semibold text-slate-600 mb-1">Location Label</label>
+              <input
+                type="text"
+                [(ngModel)]="location"
+                placeholder="e.g. Site Office"
+                class="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+              />
+            </div>
+            <div>
+              <label class="block text-[11px] font-semibold text-slate-600 mb-1">Latitude</label>
+              <input
+                type="number"
+                [(ngModel)]="latitude"
+                placeholder="9.9816"
+                class="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+              />
+            </div>
+            <div>
+              <label class="block text-[11px] font-semibold text-slate-600 mb-1">Longitude</label>
+              <input
+                type="number"
+                [(ngModel)]="longitude"
+                placeholder="76.2999"
+                class="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+              />
+            </div>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="px-6 py-4 border-t border-slate-100 bg-slate-50 flex items-center justify-end gap-3">
+          <button
+            type="button"
+            (click)="close.emit()"
+            class="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-200/60 rounded-xl transition"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            (click)="commitStatusChange()"
+            [disabled]="isSaving() || !selectedStatusId || !description.trim()"
+            class="px-5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl shadow-md shadow-indigo-600/20 transition flex items-center gap-2"
+          >
+            @if (isSaving()) {
+              <svg class="animate-spin h-3.5 w-3.5 text-white" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+              </svg>
+              <span>Committing Flow...</span>
+            } @else {
+              <span>Commit & Generate Next Tasks</span>
+            }
+          </button>
+        </div>
+      </div>
+    </div>
+  `
+})
+export class TaskStatusModalComponent implements OnInit {
+  @Input({ required: true }) task!: TaskOverviewItem;
+  @Output() close = new EventEmitter<void>();
+  @Output() committed = new EventEmitter<void>();
+
+  @ViewChild('customFieldsComp') customFieldsComp?: DynamicCustomFieldsComponent;
+
+  private taskService = inject(TaskService);
+  private metadataService = inject(MetadataService);
+  private authService = inject(AuthService);
+
+  statuses = signal<WorkingStatusItem[]>([]);
+  users = signal<UserDetailItem[]>([]);
+  subsequentTasks = signal<ProcessFlowTaskType[]>([]);
+  customFields = signal<CustomFieldDefinition[]>([]);
+
+  selectedStatusId: number = 0;
+  flowId: number = 0;
+  flowMessage = signal<string>('');
+  description: string = '';
+  remarks: string = '';
+  nextFollowUpDate: string = '';
+  followupTime: string = '14:00';
+  location: string = 'Kochi';
+  latitude: number = 9.9816;
+  longitude: number = 76.2999;
+
+  taskCheckedMap: { [key: number]: boolean } = {};
+  taskUserMap: { [key: number]: number } = {};
+
+  isLoadingFlow = signal(false);
+  isSaving = signal(false);
+  errorMessage = signal<string | null>(null);
+
+  ngOnInit(): void {
+    this.selectedStatusId = this.task.Task_Status_Id || 0;
+    this.loadStatuses();
+    this.loadUsers();
+    this.initGeoLocation();
+  }
+
+  private initGeoLocation(): void {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          this.latitude = Number(pos.coords.latitude.toFixed(6));
+          this.longitude = Number(pos.coords.longitude.toFixed(6));
+        },
+        () => {}
+      );
+    }
+  }
+
+  private loadStatuses(): void {
+    this.metadataService.getStatusByTaskTypeId(this.task.Task_Type_Id).subscribe({
+      next: (list) => {
+        if (list && list.length > 0) {
+          this.statuses.set(list);
+        } else {
+          // Fallback to all working statuses
+          this.metadataService.getWorkingStatusList().subscribe({
+            next: (all) => this.statuses.set(all)
+          });
+        }
+      },
+      error: () => {
+        this.metadataService.getWorkingStatusList().subscribe({
+          next: (all) => this.statuses.set(all)
+        });
+      }
+    });
+  }
+
+  private loadUsers(): void {
+    this.metadataService.getUsers().subscribe({
+      next: (list) => this.users.set(list)
+    });
+  }
+
+  onStatusSelected(statusId: number): void {
+    if (!statusId) {
+      this.subsequentTasks.set([]);
+      this.flowMessage.set('');
+      return;
+    }
+
+    this.isLoadingFlow.set(true);
+    this.errorMessage.set(null);
+
+    this.taskService
+      .getProcessFlow(
+        this.task.Task_Type_Id,
+        Number(statusId),
+        this.task.Customer_Id,
+        this.authService.currentUserId()
+      )
+      .subscribe({
+        next: (res: ProcessFlowResponse) => {
+          this.isLoadingFlow.set(false);
+          this.handleProcessFlowResponse(res);
+        },
+        error: (err) => {
+          this.isLoadingFlow.set(false);
+          // If no specific process flow rule, still allow status change
+          this.subsequentTasks.set([]);
+          this.flowMessage.set('');
+        }
+      });
+  }
+
+  private handleProcessFlowResponse(res: ProcessFlowResponse): void {
+    if (res.enquiry && res.enquiry.length > 0) {
+      this.flowId = res.enquiry[0].FlowId;
+      this.flowMessage.set(res.enquiry[0].message);
+    }
+
+    const tasks = res.data || [];
+    this.subsequentTasks.set(tasks);
+
+    // Initialize checkboxes and assigned users
+    let maxDuration = 1;
+    const defaultUserId = this.authService.currentUserId();
+
+    for (const t of tasks) {
+      this.taskCheckedMap[t.Task_Type_Id] = t.Is_Checked === 1;
+      this.taskUserMap[t.Task_Type_Id] = defaultUserId;
+      if (t.Duration && t.Duration > maxDuration) {
+        maxDuration = t.Duration;
+      }
+    }
+
+    // Auto-calculate follow-up date based on duration
+    const d = new Date();
+    d.setDate(d.getDate() + maxDuration);
+    this.nextFollowUpDate = d.toISOString().split('T')[0];
+
+    // Load any custom fields for process flow
+    if (res.show_custom_field && Array.isArray(res.show_custom_field)) {
+      this.customFields.set(
+        res.show_custom_field.map((cf) => ({
+          customFieldId: cf.Custom_Field_Id || cf.customFieldId,
+          customFieldName: cf.Custom_Field_Name || cf.customFieldName,
+          customFieldTypeId: cf.Custom_Field_Type_Id || cf.customFieldTypeId || 2,
+          isMandatory: cf.Is_Mandatory || 0
+        }))
+      );
+    }
+  }
+
+  onSubTaskCheckToggle(subTask: ProcessFlowTaskType): void {
+    // Recalculate duration when selections change
+    let maxDuration = 1;
+    for (const t of this.subsequentTasks()) {
+      if (this.taskCheckedMap[t.Task_Type_Id] && t.Duration > maxDuration) {
+        maxDuration = t.Duration;
+      }
+    }
+    const d = new Date();
+    d.setDate(d.getDate() + maxDuration);
+    this.nextFollowUpDate = d.toISOString().split('T')[0];
+  }
+
+  onCustomFieldsChanged(vals: CustomFieldValuePayload[]): void {
+    // Conditional Process Flow with Custom Fields (Step 2)
+    if (vals.length > 0 && this.selectedStatusId) {
+      this.taskService
+        .getProcessFlowWithCustomFields(
+          this.task.Task_Type_Id,
+          Number(this.selectedStatusId),
+          this.task.Customer_Id,
+          vals,
+          this.authService.currentUserId()
+        )
+        .subscribe({
+          next: (res) => this.handleProcessFlowResponse(res)
+        });
+    }
+  }
+
+  commitStatusChange(): void {
+    if (!this.selectedStatusId) {
+      this.errorMessage.set('Please select a valid task status.');
+      return;
+    }
+    if (!this.description.trim()) {
+      this.errorMessage.set('Please provide a description.');
+      return;
+    }
+
+    this.isSaving.set(true);
+    this.errorMessage.set(null);
+
+    const selectedStatus = this.statuses().find((s) => s.Status_Id == this.selectedStatusId);
+
+    // Selected subsequent task IDs (comma separated)
+    const selectedTaskIds = Object.keys(this.taskCheckedMap)
+      .filter((id) => this.taskCheckedMap[Number(id)])
+      .join(',');
+
+    // TaskUsers mappings: [{ task_type_id, to_user_id }]
+    const taskUsers = Object.keys(this.taskCheckedMap)
+      .filter((id) => this.taskCheckedMap[Number(id)])
+      .map((id) => ({
+        task_type_id: Number(id),
+        to_user_id: Number(this.taskUserMap[Number(id)] || this.authService.currentUserId())
+      }));
+
+    const payload: TaskStatusChangePayload = {
+      Task_Id: this.task.Task_Id,
+      Status_Id: Number(this.selectedStatusId),
+      Status_Name: selectedStatus?.Status_Name || 'Completed',
+      flow_id: this.flowId || undefined,
+      By_User_Id: this.authService.currentUserId(),
+      Description: this.description.trim(),
+      Remarks: this.remarks.trim(),
+      Next_FollowUp_Date: this.nextFollowUpDate,
+      Followup_Time: this.followupTime,
+      Location: this.location,
+      Latitude: this.latitude,
+      Longitude: this.longitude,
+      Tasks: selectedTaskIds,
+      TaskUsers: taskUsers,
+      CustomFields: this.customFieldsComp ? this.customFieldsComp.getSerializedValues() : [],
+      Sub_Status_Id: null,
+      Sub_Status_Name: null,
+      Task_Files: []
+    };
+
+    this.taskService.changeTaskStatus(payload).subscribe({
+      next: () => {
+        this.isSaving.set(false);
+        this.committed.emit();
+        this.close.emit();
+      },
+      error: (err) => {
+        this.isSaving.set(false);
+        this.errorMessage.set(
+          err?.error?.message || err?.message || 'Failed to update task status. Please try again.'
+        );
+      }
+    });
+  }
+}
+
